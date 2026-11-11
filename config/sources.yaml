@@ -1,0 +1,40 @@
+# Registry of external source datasets. Raw files are downloaded verbatim into
+# data/raw/<source id>/ and never modified. Everything a processing step needs
+# to know about a source (units, vertical datum, CRS expectations) is declared
+# here explicitly, because the source files themselves do not carry it all
+# (e.g. the CTX DTM COGs have no unit tag).
+sources:
+  - id: ctx_dtm_P18_007925_P19_008650
+    title: USGS controlled CTX DTM P18_007925_1987 / P19_008650_1987 (Jezero)
+    kind: elevation
+    url: https://astrogeo-ard.s3-us-west-2.amazonaws.com/mars/mro/ctx/controlled/usgs/P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W/P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W_dtm.tif
+    stac_item: https://stac.astrogeology.usgs.gov/api/collections/mro_ctx_controlled_usgs_dtms/items/P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W
+    sidecars:
+      qa_metrics: https://astrogeo-ard.s3-us-west-2.amazonaws.com/mars/mro/ctx/controlled/usgs/P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W/qa_metrics.txt
+    license: CC0-1.0
+    citation: >-
+      USGS Astrogeology Science Center, Analysis Ready Data: MRO CTX controlled
+      USGS DTMs (stac.astrogeology.usgs.gov, collection mro_ctx_controlled_usgs_dtms).
+    expected:
+      crs_name_contains: "Mars (2015) - Sphere / Ocentric / Equirectangular"
+      dtype: float32
+      nodata: -32767.0
+    # Declared, not read from the file: the COG has no units tag.
+    units: m
+    vertical_datum: MOLA areoid (GeoTIFF tag GEOID=mola)
+  - id: ctx_ortho_P18_007925_P19_008650
+    title: USGS controlled CTX orthoimage paired with the DTM above
+    kind: orthoimage
+    url: https://astrogeo-ard.s3-us-west-2.amazonaws.com/mars/mro/ctx/controlled/usgs/P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W/P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W_orthoimage.tif
+    stac_item: https://stac.astrogeology.usgs.gov/api/collections/mro_ctx_controlled_usgs_dtms/items/P18_007925_1987_XN_18N282W__P19_008650_1987_XI_18N282W
+    license: CC0-1.0
+    citation: >-
+      USGS Astrogeology Science Center, Analysis Ready Data: MRO CTX controlled
+      USGS DTMs (orthoimage asset).
+    expected:
+      crs_name_contains: "Mars (2015) - Sphere / Ocentric / Equirectangular"
+      dtype: float32
+      nodata: -32767.0
+    # Observed: float32, values ~0-0.95, same 20.16 m grid as the DTM, no unit tag.
+    # Possibly I/F, unverified -> treated as dimensionless relative brightness.
+    units: "1"

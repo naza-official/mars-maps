@@ -1,0 +1,66 @@
+# Canonical analysis region. Every processed layer for this region is warped onto
+# a grid that shares this CRS and origin (see docs/data-model.md).
+id: jezero
+name: Jezero crater and western delta
+body: mars
+# Region CRS: Transverse Mercator on the IAU 2015 Mars sphere (IAU_2015:49900,
+# R = 3 396 190 m), planetocentric latitude, east-positive longitude.
+# TM is conformal (correct slope azimuths) with scale error < 0.01 % within
+# ±80 km of the central meridian, so metric derivatives (slope, distance) are valid.
+crs:
+  projection: tmerc
+  lon_0: 77.45     # degrees east, planetocentric
+  lat_0: 18.45     # degrees north, planetocentric
+# Square region frame centred on (lon_0, lat_0), in region-CRS metres.
+# half_size = 256 px * 20 m * 2^5 / 2 => zoom 5 of the region TMS is exactly 20 m/px.
+half_size_m: 81920
+base_resolution_m: 20.0
+tile_size: 256
+max_zoom: 8        # 2.5 m/px: overzoom beyond the 20 m data, for inspection convenience
+
+# Layer recipes. `resolution_m` must be base_resolution_m / 2^k (nested, aligned grids).
+# Resampling choices are explicit per layer: bilinear for continuous fields,
+# never nearest-on-downsample for elevation, never cubic for elevation (overshoot).
+layers:
+  - id: elevation
+    title: Elevation (CTX DTM)
+    op: warp
+    source: ctx_dtm_P18_007925_P19_008650
+    resolution_m: 20.0
+    resampling: bilinear
+    dtype: float32
+    units: m
+    description: Height above the MOLA areoid, from the USGS controlled CTX DTM.
+    render: { colormap: gist_earth, rescale: auto }
+  - id: orthoimage
+    title: CTX orthoimage
+    op: warp
+    source: ctx_ortho_P18_007925_P19_008650
+    resolution_m: 20.0
+    resampling: bilinear
+    dtype: float32
+    units: "1"
+    description: >-
+      Orthorectified CTX image brightness as delivered by USGS (float32, observed
+      range ~0-0.95). The source carries no unit metadata; it may be I/F, but that is
+      unverified, so treat it as relative brightness only.
+    render: { colormap: null, rescale: auto }
+  - id: slope
+    title: Terrain slope
+    op: slope
+    input: elevation
+    dtype: float32
+    units: deg
+    description: >-
+      Slope angle (Horn 1981, 3x3) computed on the 20 m elevation grid in the
+      region CRS. NaN wherever any of the 9 neighbours is missing.
+    render: { colormap: rdylgn_r, rescale: [0, 30] }
+  - id: hillshade
+    title: Hillshade
+    op: hillshade
+    input: elevation
+    dtype: uint8
+    units: "1"
+    description: Visual-only hillshade (azimuth 315°, altitude 45°). Not for analysis.
+    params: { azimuth_deg: 315, altitude_deg: 45 }
+    render: { colormap: null, rescale: [1, 255] }

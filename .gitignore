@@ -1,0 +1,27 @@
+# Scientific data and generated rasters are never committed (re-create with `marsgis build`)
+/data/
+*.tif
+*.tiff
+*.TIF
+*.npy
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Local Claude Code settings
+.claude/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+.env

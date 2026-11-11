@@ -1,0 +1,68 @@
+# Local development environment. One command:  docker compose up --build
+#
+#   init-data  one-shot: downloads the sample Mars sources and builds layers (idempotent)
+#   api        FastAPI + TiTiler (titiler.core) on http://localhost:8000/api/docs
+#   web        Vite dev server (OpenLayers client) on http://localhost:5173
+#
+# Persistence: ./data is a bind mount (raw downloads + processed COGs + STAC catalog).
+# It survives container recreation; it is also fully reproducible from config/ via
+# `marsgis build`, so deleting it only costs a re-download (~45 MB).
+name: marsgis
+
+x-backend: &backend
+  build: ./backend
+  image: marsgis-backend:dev
+  environment:
+    MARSGIS_DATA_DIR: /data
+    MARSGIS_CONFIG_DIR: /config
+    MARSGIS_LOG_LEVEL: ${MARSGIS_LOG_LEVEL:-INFO}
+    MARSGIS_LOG_JSON: ${MARSGIS_LOG_JSON:-true}
+    MARSGIS_CORS_ORIGINS: '["http://localhost:5173"]'
+    # GDAL tuning for COG range reads (local files today, S3/MinIO later)
+    GDAL_HTTP_MERGE_CONSECUTIVE_RANGES: "YES"
+    VSI_CACHE: "TRUE"
+
+services:
+  init-data:
+    <<: *backend
+    command: ["marsgis", "ensure-data"]
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+    restart: "no"
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "marsgis.api.app:app", "--host", "0.0.0.0", "--port", "8000",
+              "--reload", "--reload-dir", "/app/src", "--reload-dir", "/config"]
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/src:/app/src        # live code reload
+      - ./backend/tests:/app/tests
+      - ./config:/config:ro
+      - ./data:/data:ro               # the API never writes data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build: ./frontend
+    image: marsgis-web:dev
+    environment:
+      VITE_API_PROXY: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/web/src
+      - ./frontend/index.html:/web/index.html
+      - ./frontend/vite.config.ts:/web/vite.config.ts

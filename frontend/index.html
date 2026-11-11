@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>marsgis · Jezero prototype</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header>
+          <h1>marsgis</h1>
+          <p id="region-name">loading…</p>
+          <p id="crs-name" class="muted"></p>
+        </header>
+        <section>
+          <h2>Layers</h2>
+          <div id="layers"></div>
+        </section>
+        <section>
+          <h2>Inspect <span class="muted">(click the map)</span></h2>
+          <div id="inspect" class="muted">No location selected.</div>
+        </section>
+        <footer class="muted">
+          Data: USGS Astrogeology ARD, MRO CTX controlled DTM &amp; orthoimage (CC0).
+          Coordinates: IAU 2015 Mars sphere, planetocentric latitude, east-positive longitude.
+        </footer>
+      </aside>
+      <main id="map"><div id="cursor" class="readout"></div></main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
