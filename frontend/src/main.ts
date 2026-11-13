@@ -17,6 +17,7 @@ import TileGrid from "ol/tilegrid/TileGrid";
 import proj4 from "proj4";
 
 import { api, type InspectResult, type LayerInfo, type RegionInfo } from "./api";
+import { setupRoutePanel } from "./route";
 
 const REGION_ID = new URLSearchParams(location.search).get("region") ?? "jezero";
 const COLORMAPS = ["gist_earth", "terrain", "viridis", "magma", "cividis", "rdylgn_r", "gray"];
@@ -110,9 +111,21 @@ function defaultRescale(info: LayerInfo): [number, number] {
   return [Math.floor(lo * f) / f, Math.ceil(hi * f) / f];
 }
 
+function hexToRgba(hex: string, alpha = 255): [number, number, number, number] {
+  const v = parseInt(hex.replace("#", ""), 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255, alpha];
+}
+
 function makeSource(region: RegionInfo, grid: TileGrid, proj: Projection, st: LayerState): XYZ {
-  const params: Record<string, string> = { rescale: st.rescale.join(",") };
-  if (st.colormap && st.colormap !== "gray") params.colormap_name = st.colormap;
+  let params: Record<string, string>;
+  if (st.info.categories.length) {
+    // categorical layer: exact value -> colour mapping, never rescaled or interpolated
+    const cmap = Object.fromEntries(st.info.categories.map((c) => [c.value, hexToRgba(c.color)]));
+    params = { colormap: JSON.stringify(cmap) };
+  } else {
+    params = { rescale: st.rescale.join(",") };
+    if (st.colormap && st.colormap !== "gray") params.colormap_name = st.colormap;
+  }
   return new XYZ({
     url: api.tileUrl(region.tms.id, region.id, st.info.id, params),
     projection: proj,
@@ -178,6 +191,21 @@ function renderLayerPanel(
     };
     vis.checked = st.layer.getVisible();
     op.value = String(st.layer.getOpacity());
+    vis.onchange = () => st.layer.setVisible(vis.checked);
+    op.oninput = () => st.layer.setOpacity(Number(op.value));
+    if (info.categories.length) {
+      // categorical: swatch legend instead of colormap/rescale controls
+      cmap.parentElement!.remove();
+      legend.nextElementSibling!.remove();
+      const sw = document.createElement("div");
+      sw.className = "chips";
+      sw.innerHTML = info.categories
+        .map((c) => `<span class="chip"><i style="background:${c.color}"></i>${c.label}</span>`)
+        .join(" ");
+      legend.replaceWith(sw);
+      root.append(el);
+      continue;
+    }
     for (const name of COLORMAPS) cmap.add(new Option(name, name));
     cmap.value = st.colormap ?? "gray";
     lo.value = String(st.rescale[0]);
@@ -185,8 +213,6 @@ function renderLayerPanel(
     labels();
     void drawLegend(legend, st.colormap);
 
-    vis.onchange = () => st.layer.setVisible(vis.checked);
-    op.oninput = () => st.layer.setOpacity(Number(op.value));
     cmap.onchange = () => {
       st.colormap = cmap.value;
       void drawLegend(legend, st.colormap);
@@ -213,7 +239,9 @@ function renderInspect(res: InspectResult, region: RegionInfo): void {
     .map((l) => {
       const s = res.layers[l.id];
       if (!s) return "";
-      const val = s.status === "ok" ? fmt(s.value, s.units) : `<em>${s.status}</em>`;
+      const cat = l.categories.find((c) => c.value === s.value);
+      const val = s.status !== "ok" ? `<em>${s.status}</em>`
+        : cat ? `<i class="sw" style="background:${cat.color}"></i>${cat.label}` : fmt(s.value, s.units);
       return `<tr><td>${l.title}</td><td class="num">${val}</td></tr>`;
     })
     .join("");
@@ -239,12 +267,17 @@ async function main(): Promise<void> {
   const grid = tileGrid(region);
 
   // Bottom -> top draw order and initial visibility.
-  const order = ["orthoimage", "elevation", "hillshade", "slope"];
+  const order = ["orthoimage", "elevation", "hillshade", "slope", "hirise_elevation",
+    "hirise_slope", "hirise_tilt_5m", "hirise_roughness_5m", "time_perseverance",
+    "cost_perseverance", "trav_class_perseverance", "hirise_hillshade"];
   const initial: Record<string, { visible: boolean; opacity: number }> = {
     orthoimage: { visible: false, opacity: 1 },
     elevation: { visible: true, opacity: 1 },
     hillshade: { visible: true, opacity: 0.45 },
     slope: { visible: false, opacity: 0.8 },
+    hirise_elevation: { visible: true, opacity: 1 },
+    trav_class_perseverance: { visible: true, opacity: 0.45 },
+    hirise_hillshade: { visible: true, opacity: 0.5 },
   };
   const rank = (id: string) => (order.includes(id) ? order.indexOf(id) : order.length);
   const infos = [...region.layers].sort((a, b) => rank(a.id) - rank(b.id));
@@ -292,7 +325,9 @@ async function main(): Promise<void> {
     }),
   ];
 
-  const elevation = region.layers.find((l) => l.id === "elevation") ?? region.layers[0];
+  // open on the high-resolution product if present (that is where routes can be planned)
+  const elevation = region.layers.find((l) => l.id === "hirise_elevation")
+    ?? region.layers.find((l) => l.id === "elevation") ?? region.layers[0];
   const [x0, y0, x1, y1] = elevation.bounds_xy;
   const map = new Map({
     target: "map",
@@ -308,6 +343,7 @@ async function main(): Promise<void> {
   map.getView().fit([x0, y0, x1, y1], { padding: [20, 20, 20, 20] });
 
   renderLayerPanel(states, (st) => st.layer.setSource(makeSource(region, grid, proj, st)));
+  const routePanel = setupRoutePanel(map, region);
 
   map.on("pointermove", (e) => {
     const [x, y] = e.coordinate;
@@ -317,6 +353,7 @@ async function main(): Promise<void> {
   });
 
   map.on("singleclick", async (e) => {
+    if (routePanel.handleClick(e.coordinate)) return;
     const [x, y] = e.coordinate;
     marker.clear();
     marker.addFeature(new Feature(new Point([x, y])));

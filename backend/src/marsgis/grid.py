@@ -45,14 +45,28 @@ class GridSpec:
         return Affine(self.resolution, 0.0, self.origin_x, 0.0, -self.resolution, self.origin_y)
 
     def at_resolution(self, resolution: float) -> GridSpec:
-        """A nested grid of the same family. ``resolution`` must be base / 2^k or base * 2^k."""
+        """A nested grid of the same family.
+
+        ``resolution`` must be ``base / n`` or ``base * n`` for an integer ``n`` and must
+        divide the frame exactly, so every cell of the coarser grid is an exact block of
+        cells of the finer one (no partial cells, no re-resampling when stacking).
+        Powers of two additionally coincide with tile-matrix zoom levels (bit-identical
+        tiles); other integers (e.g. 20 m / 20 = 1 m for HiRISE, keeping its native
+        posting) are aligned for analysis but are resampled by the tiler for display.
+        """
+        if resolution <= 0:
+            raise ValueError("resolution must be positive")
         ratio = self.resolution / resolution
-        k = math.log2(ratio)
-        if abs(k - round(k)) > _EPS:
+        n = ratio if ratio >= 1 else 1.0 / ratio
+        if abs(n - round(n)) > _EPS * n:
             raise ValueError(
-                f"resolution {resolution} is not base {self.resolution} times a power of two"
+                f"resolution {resolution} is not base {self.resolution} times or divided by "
+                "an integer"
             )
-        factor = 2.0 ** round(k)
+        factor = round(n) if ratio >= 1 else 1.0 / round(n)
+        size_w, size_h = self.width * factor, self.height * factor
+        if abs(size_w - round(size_w)) > _EPS or abs(size_h - round(size_h)) > _EPS:
+            raise ValueError(f"resolution {resolution} does not divide the region frame")
         return GridSpec(
             crs=self.crs,
             origin_x=self.origin_x,

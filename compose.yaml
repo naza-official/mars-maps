@@ -27,6 +27,7 @@ services:
     <<: *backend
     command: ["marsgis", "ensure-data"]
     volumes:
+      - ./backend/src:/app/src:ro     # same code as the api service (editable install)
       - ./config:/config:ro
       - ./data:/data
     restart: "no"

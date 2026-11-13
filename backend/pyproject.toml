@@ -10,6 +10,8 @@ dependencies = [
     "rasterio==1.5.2",        # bundles GDAL 3.12.2 + PROJ 9.8.1 (IAU_2015 CRS database included)
     "pyproj==3.8.0",          # bundles PROJ 9.8.1
     "numpy==2.3.5",
+    "scipy==1.18.1",          # ndimage (windowed terrain operators), sparse.csgraph (Dijkstra)
+    "scikit-image==0.26.0",   # graph.MCP_Geometric (independent minimum-cost-path engine)
     "morecantile==7.1.0",
     "rio-tiler==9.4.13",
     "titiler.core==2.4.0",

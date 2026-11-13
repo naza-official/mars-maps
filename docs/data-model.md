@@ -40,9 +40,13 @@ Each **region** defines one *grid family*:
   20 m analysis grid.
 * **Origin**: the frame's top-left corner (−81 920, +81 920).
 * **Base resolution**: 20 m (≈ CTX DTM native 20.16 m; slight oversampling, no aliasing).
-* **Nested resolutions**: a layer may use `base / 2^k` (or `base · 2^k`). All layers of a
-  region are therefore pixel-aligned: every coarse pixel is an exact block of fine
-  pixels. `GridSpec.at_resolution()` rejects any other resolution.
+* **Nested resolutions**: a layer may use `base / n` or `base · n` for an integer `n`
+  that divides the frame (generalised from powers of two on 2026-11-13, decision D10).
+  All layers of a region are therefore pixel-aligned: every coarse pixel is an exact
+  block of fine pixels. `GridSpec.at_resolution()` rejects any other resolution.
+  Powers of two additionally coincide with tile zooms (bit-identical tiles). Other
+  ratios, e.g. the **1 m HiRISE grid** (20 m / 20), are exact for analysis and are
+  resampled by the tiler for display only.
 
 ### Alignment rules
 1. Output extents are the source footprint transformed with densified edges, snapped
@@ -58,7 +62,7 @@ Each **region** defines one *grid family*:
 |---|---|
 | Storage | Cloud Optimized GeoTIFF, DEFLATE + predictor, 512×512 internal tiles, internal overviews (AVERAGE), BigTIFF if needed |
 | Bands | One physical quantity per file (single band). Multiband only for genuinely joint quantities (e.g. RGB). |
-| dtype | `float32` for physical quantities; `uint8` only for visual products (hillshade) |
+| dtype | `float32` for physical quantities; `uint8` for visual products (hillshade) and categorical layers (traversability class, overviews resampled with MODE, never AVERAGE) |
 | NoData (float) | **NaN**. Source sentinels (e.g. −32767) are converted to NaN during warping and never appear in processed data. |
 | NoData (integer) | A declared value outside the valid range (hillshade: 0, valid 1–255) |
 | Zero | Always a real value. Missing data is never written as 0 (tested). |
@@ -70,6 +74,8 @@ Each **region** defines one *grid family*:
 * Warping: GDAL excludes nodata from the bilinear kernel. Edge cells next to nodata may
   therefore be computed from fewer than 4 valid neighbours; they are not filled beyond
   the source footprint.
+* Footprint features (plane fit over n × n): NaN unless all n² cells are present; such
+  cells become class UNKNOWN (impassable) in traversability.
 * Slope/hillshade (Horn 3×3): the result is NaN if **any** of the 9 cells is missing,
   including the centre (which has zero weight in Horn's kernel — this case was a bug
   caught by `test_slope_nan_propagation`, fixed in algorithm version 2).
@@ -83,6 +89,11 @@ Each **region** defines one *grid family*:
 | orthoimage | `1` (relative brightness) | **Unknown physical unit.** Float32, values mostly 0–0.95, a few slightly negative (min −0.09). Possibly I/F but undocumented by the source, so it must not be used quantitatively. |
 | slope | degrees | Derived: `atan(|∇z|)` with ∇z in m/m |
 | hillshade | `1` (1–255 shading) | Visual only |
+| hirise_elevation | m above the Mars 2000 datum (MOLA areoid) | PDS3 label `NOTE` of the HiRISE DTM; same datum as CTX, but a measured −26.3 m mean offset between the products (control differences, `terrain-analysis.md` §6) |
+| hirise_tilt_5m | degrees | Plane-fit inclination over a 5 × 5 m patch |
+| hirise_roughness_5m | m | Max absolute plane-fit residual over a 5 × 5 m patch |
+| trav_class_\<vehicle\> | class (uint8: 1 nominal, 2 slow, 3 marginal, 4 hazard, 5 unknown; 0 nodata) | `traversability.py` |
+| time_\<vehicle\>, cost_\<vehicle\> | s/m (NaN = not traversable) | Speed model; cost = time × risk weight on marginal cells |
 
 Conversions between units are not performed implicitly anywhere. A future conversion
 (e.g. K ↔ °C, I/F ↔ radiance) must be a named processing step with its own algorithm
@@ -142,6 +153,9 @@ read as `float32` arrays with NaN for missing data:
 * for large regions or many time steps a Zarr store with the same grid (chunk = 512×512)
   is the planned representation (see `decisions.md`, D6).
 
-Pathfinding consumes a **cost surface** — a derived layer on the same grid — so routes
+Pathfinding consumes a **cost surface**, a derived layer on the same grid, so routes
 are sequences of grid cells (row, col) that convert to region x/y and lon/lat with the
-grid transform and region CRS.
+grid transform and region CRS. This is implemented: `planning.py` reads the cost, time
+and class COGs of the vehicle (region `planning:` config) for a bounded window and
+samples feature layers at the route's cells by coordinate, which works for any aligned
+member of the grid family.

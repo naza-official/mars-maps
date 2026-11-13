@@ -161,6 +161,86 @@ Not needed for one region with four layers. The design keeps the seams:
   spatial queries. Note: PostGIS `spatial_ref_sys` has no IAU entries; planetary SRIDs
   must be inserted (unverified here).
 
+Re-evaluated 2026-11-13 with routing in place: routes are computed on demand and
+returned as JSON with input versions, and nothing needs to persist or query them
+spatially yet. The decision stands.
+
+---
+
+## D10. Multi-resolution: integer-nested grids, products kept separate (2026-11-13)
+
+**Context.** HiRISE DTMs (1 m) cover small parts of the 20 m CTX region. The prompt and
+the science both require keeping native resolution and source provenance.
+
+**Decision.** Generalise grid nesting from `base / 2^k` to `base / n` for an integer `n`.
+HiRISE is warped once onto the **1 m** member of the region grid family, close to its
+1.0097 m posting. Every 20 m cell is an exact 20 × 20 block of 1 m cells. CTX and HiRISE
+remain **separate products**; each analysis declares which one it uses (planning uses
+HiRISE, and refuses waypoints outside its coverage).
+
+**Alternatives.** 1.25 m (power-of-two zoom, bit-identical tiles at z9: rejected, since
+it falls below native posting). Resampling to 20 m (rejected: destroys the information).
+Mosaicking (deferred: a measured −26.3 m vertical offset between the products must be
+co-registered first).
+
+**Consequences.** Tiles of 1 m layers are resampled by TiTiler for display (z10 =
+0.625 m). Exact block statistics across resolutions became trivial (`marsgis
+compare-dtm`).
+
+## D11. Ingest the original PDS3 HiRISE DTM, not the USGS ARD COG
+
+**Evidence.** The ARD COG was made with `gdalwarp -r cubic` from the PDS IMG (its own
+`provenance.txt`). GDAL's PDS driver in our wheel reads the IMG correctly (CRS,
+`MISSING_CONSTANT`, scaling verified). **Decision:** the PDS IMG is the raw source,
+with SHA-256 provenance and the ARD `provenance.txt` kept as a sidecar. The cost is a
+380 MB download instead of 157 MB, once.
+
+## D12. Rover-footprint plane-fit descriptors (GESTALT-style); TRI/VRM not used
+
+**Decision.** Terrain features for mobility are the tilt and maximum residual of a plane
+fitted to a rover-footprint patch (5 m), following GESTALT. Implemented with SciPy
+`ndimage.correlate` (exact sums) and validated analytically. **Rejected:** TRI (mixes
+slope and roughness), VRM (dimensionless, cannot be compared with clearance), raw
+curvature (amplifies noise; body clearance needs an ACE-type model), xarray-spatial
+(WGS84-geodesic path, heavy dependencies), WhiteboxTools (runtime binary download),
+RichDEM (no arm64 wheel, GPL). Details: `terrain-analysis.md` §3, `research.md` §11.
+
+## D13. Vehicle-specific traversability with declared parameter provenance
+
+**Decision.** Separate layers for features → classes → time → cost. Vehicle YAML where
+every value has `value, unit, basis (published | derived | assumption), source`. Model
+structure from Ono et al. 2016 (thresholds plus a speed model, cost = 1/speed). Unknown
+terrain is impassable. Uncertainty enters as a k-σ "marginal" band with an explicit
+risk multiplier. A one-at-a-time sensitivity analysis is a CLI command and its results
+are documented. **Rejected:** a weighted sum of normalised slope, roughness etc. with
+invented weights. It has no physical unit, cannot be checked, and is exactly what the
+requirements warn against.
+
+**Correction made during review:** `max_step = 0.35 m` was first labelled "published"
+(as a Perseverance wheel-drop limit). NASA's primary source (PIA26073) only shows
+AutoNav avoiding a 35 cm rock, so it is now labelled `assumption`.
+
+## D14. Planner: SciPy csgraph Dijkstra (default) + scikit-image MCP (second engine)
+
+**Decision.** Both are established Dijkstra implementations. SciPy on an explicit graph
+forbids corner cutting and allows directional costs later. scikit-image's
+`MCP_Geometric` uses ~3× less memory and serves as an independent cross-check (identical
+optimum on random fields and on the real route). The planner module is
+framework-independent. Planning windows are capped at 8 M cells (measured 2.4 GB
+peak), and the API allows 2 concurrent plans. **Rejected or deferred:** custom
+A* (no need; libraries exist), NetworkX (too slow), scikit-fmm (no arm64 wheel), OMPL
+and Nav2 (continuous or ROS-oriented; references for future kinematic planning).
+Details: `path-planning.md`.
+
+## D15. DTM relative vs absolute precision
+
+**Evidence.** With σ = 0.25 m (absolute precision), white noise would put every 5 m
+patch's max residual near 0.5 m, but the measured median is 0.037 m. **Decision:**
+sources declare `vertical_precision` (absolute) and `relative_precision` (patch scale,
+here 0.05 m, *derived* from the measured distribution with 2.5× margin). Patch features
+use the relative value. This changed the marginal fraction from 6.1 % to 0.13 % of the
+observed terrain.
+
 ---
 
 ## Unresolved questions
@@ -179,5 +259,11 @@ Not needed for one region with four layers. The design keeps the seams:
    away from the poles; polar regions → `laea` or polar stereographic.
 6. **Temporal layers** (temperature, radiation): time dimension → Zarr/xarray; STAC
    `datetime` semantics for model outputs vs observations.
-7. **Uncertainty**: the CTX DTM's QA reports a 27.4 ± 10.9 m mean offset vs MOLA shots;
-   whether/how to propagate DTM uncertainty into traversability is open.
+7. ~~**Uncertainty**: whether/how to propagate DTM uncertainty into traversability is
+   open.~~ Addressed for patch-scale features (D15, `traversability.md`). Still open:
+   per-post quality (HiRISE FOM values are only distributed as a colour rendering) and
+   CTX–HiRISE vertical co-registration before any fusion (measured −26.3 ± 8.6 m).
+8. **Rock abundance and terrain classes** are the largest missing inputs to the
+   traversability model. Both need imagery-based analysis (HiRISE RED at 0.25 m).
+9. **Validation data**: Perseverance's actual drive path through this DTM is public and
+   should become the first validation dataset for the planner and classes.

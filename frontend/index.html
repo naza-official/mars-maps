@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>marsgis · Jezero prototype</title>
+    <title>marsgis · Jezero</title>
   </head>
   <body>
     <div id="app">
@@ -14,6 +14,10 @@
           <p id="crs-name" class="muted"></p>
         </header>
         <section>
+          <h2>Route <span class="muted">(numerical cost raster)</span></h2>
+          <div id="route"></div>
+        </section>
+        <section>
           <h2>Layers</h2>
           <div id="layers"></div>
         </section>
@@ -22,7 +26,9 @@
           <div id="inspect" class="muted">No location selected.</div>
         </section>
         <footer class="muted">
-          Data: USGS Astrogeology ARD, MRO CTX controlled DTM &amp; orthoimage (CC0).
+          Data: USGS Astrogeology ARD, MRO CTX controlled DTM &amp; orthoimage (CC0);
+          MRO HiRISE DTM DTEEC_045994_1985_046060_1985_U01 (NASA PDS, UA/USGS).
+          Vehicle parameters are experimental; routes are analysis products, not operational plans.
           Coordinates: IAU 2015 Mars sphere, planetocentric latitude, east-positive longitude.
         </footer>
       </aside>

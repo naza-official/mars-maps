@@ -143,6 +143,28 @@ def _write_root(region_dir: Path, region_id: str) -> None:
     (region_dir / "catalog.json").write_text(json.dumps(root, indent=2))
 
 
+def item_asset_path(item: dict[str, Any], data_dir: Path) -> Path:
+    """Local path of an Item's data asset, refusing anything outside ``data_dir``."""
+    href = item["assets"]["data"]["href"]
+    if not href.startswith("/data/"):
+        raise ValueError(f"unexpected asset href {href!r}")
+    path = (data_dir / href.removeprefix("/data/")).resolve()
+    if data_dir.resolve() not in path.parents:
+        raise ValueError("asset outside the data directory")
+    return path
+
+
+def layer_path(region_id: str, layer_id: str) -> Path:
+    """Current published COG of a layer (via the catalog)."""
+    from marsgis.config import get_settings
+
+    settings = get_settings()
+    items = load_items(settings.catalog_dir, region_id)
+    if layer_id not in items:
+        raise KeyError(f"layer {layer_id!r} is not published for region {region_id!r}")
+    return item_asset_path(items[layer_id], settings.data_dir)
+
+
 def load_items(catalog_dir: Path, region_id: str) -> dict[str, dict[str, Any]]:
     """Current Items of a region keyed by layer id (plain dicts, cheap to serve)."""
     out: dict[str, dict[str, Any]] = {}

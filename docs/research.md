@@ -1,6 +1,8 @@
 # Research report
 
-Date of investigation: 2026-11-11. Versions are those current on PyPI/npm on that date.
+Date of investigation: 2026-11-11 (§1–§8, visualisation prototype) and 2026-11-13
+(§9–§15, terrain analysis, traversability and route planning). Versions are those
+current on PyPI/npm on those dates.
 
 Evidence levels used throughout:
 
@@ -165,7 +167,7 @@ Findings:
 
 ---
 
-## 5. Scientific computing and route planning (investigated, not implemented)
+## 5. Scientific computing and route planning (initial notes, superseded by §9–§14)
 
 * **Raster pathfinding**: `scikit-image` `graph.MCP` / `MCP_Geometric` (Dijkstra on cost
   rasters, handles diagonal step lengths) — simplest correct baseline; `networkx`/custom
@@ -230,3 +232,174 @@ Findings:
    documented as declared or unknown.
 6. Single-region CRS — cross-region products need reprojection; polar regions need a
    different projection choice.
+
+(Item 4 was resolved on 2026-11-13: all derivations now run strip-wise with halos; see §12.)
+
+---
+
+# Part II: terrain analysis, traversability and route planning (2026-11-13)
+
+## 9. Higher-resolution Mars terrain data for Jezero
+
+### 9.1 What exists (USGS STAC search, VERIFIED)
+
+A STAC search of `mro_hirise_socet_dtms` over 77.2–77.8° E, 18.2–18.8° N returns four
+HiRISE stereo DTMs, each with a DTM COG, a hillshade, two or four orthoimages, a
+"FOM" COG and a `provenance.txt`:
+
+| Item | Extent (° E / ° N) | Posting | Size (DTM COG) | Covers |
+|---|---|---|---|---|
+| **DTEEC_045994_1985_046060_1985_U01** | 77.383–77.501 / 18.306–18.548 | 1.0166 m (ARD) / 1.0097 m (PDS) | 157 MB (ARD COG), 381 MB (PDS IMG) | **crater floor, landing site, delta front** (selected) |
+| DTEEC_048842_1985_048908_1985_U01 | 77.462–77.584 / 18.337–18.588 | 1.017 m | – | eastern floor |
+| DTEEC_023524_1985_023379_1985_U01 | 77.453–77.598 / 18.160–18.521 | 1.015 m | – | southern floor |
+| DTEEC_023247_1985_022957_1985_U01 | 77.549–77.690 / 18.180–18.521 | 1.015 m | – | eastern floor and rim |
+
+The selected product was a candidate-site DTM ("Candidate landing site for 2020 mission
+in Jezero Crater", label `RATIONALE_DESC`) and contains the Octavia E. Butler landing
+point. Licence: NASA PDS archive data (no use restrictions); the USGS ARD copies are CC0.
+
+### 9.2 Original PDS product vs USGS ARD COG (decision D11)
+
+| Aspect | ARD COG (`astrogeo-ard`) | PDS3 IMG (`hirise-pds.lpl.arizona.edu`) |
+|---|---|---|
+| Processing | `gdalwarp -r cubic -t_srs IAU_2015:49910` from the IMG (from its `provenance.txt`) | as produced by SOCET Set, no resampling |
+| CRS | equirectangular clon = 0 on the IAU 2015 sphere | equirectangular clon = 77.44, lat_ts = 15 on the *local-radius* sphere 3 394 839.8 m |
+| Readable by our stack | yes (COG) | yes: GDAL PDS driver in the rasterio 1.5.2 wheel; CRS, `MISSING_CONSTANT`, scaling and offset read correctly (VERIFIED over `/vsicurl/` and after download) |
+| Metadata | STAC item (gsd, proj, bbox) | full PDS label (datum note, valid range, map projection, source images) |
+| Inconsistencies noticed | `provenance.txt` translates the DTM with `-ot UInt16`, yet the COG is float32 (the log does not match the product); the "FOM" asset is a 3-band uint8 colour rendering, not FOM values | label extent keywords differ from GDAL's georeferencing by ≈1.3 m (half-pixel convention) |
+
+**Selected: the PDS3 IMG.** It is the source of record, it avoids a second (cubic)
+resampling, and it needs no planetary toolchain. ISIS3 is unnecessary because the
+product is already map-projected.
+
+### 9.3 CRS and datum verification (VERIFIED)
+
+* The PDS sphere radius (local radius at the centre latitude) differs from the IAU 2015
+  sphere. PROJ transforms between them with a *ballpark geographic offset* (identity on
+  planetocentric lat/lon). That is correct for planetocentric coordinates on two Mars
+  spheres, and `assert_mars_crs` accepts the 3 394 839.8 m radius (inside the Mars band).
+* The label's MAX/MIN latitude and longitude match the transformed GDAL corners to
+  2.2·10⁻⁵° ≈ 1.3 m (about one post).
+* Heights: Mars 2000 datum (MOLA areoid), the same datum as the CTX DTM. A measured
+  **−26.3 m mean offset (σ 8.6 m)** separates HiRISE from CTX in the overlap. It is
+  explained by the CTX product's own MOLA offset (+27.4 m, CTX QA report) and recorded
+  in `terrain-analysis.md` §6.
+
+### 9.4 Precision and quality metadata
+
+* The HiRISE team says "vertical precision in the tens of centimeters", with DTMs derived
+  at about 4× image pixel scale ([uahirise.org/dtm/about.php](https://www.uahirise.org/dtm/about.php)).
+  Kirk et al. 2008 (doi:10.1029/2007JE003000) define the expected precision
+  EP = ρ·GSD/(p/h); this product's label does not give EP.
+* FOM classes in the HiRISE DTM README ([example](https://hirise.lpl.arizona.edu/PDS/EXTRAS/DTM/ESP/ORB_026400_026499/ESP_026402_1605_ESP_026257_1605/README.TXT)):
+  1 no data; 2 shadow; 3, 5–20, 28, 31–39 suspicious; 4, 30 interpolated; 21 saturated;
+  22–27, 29 manually edited; 40–59 low good correlation; 60–99 good. The distributed FOM
+  is a *colour-coded* map draped on shaded relief. The ARD `DTFEC` COG is 3-band uint8
+  (VERIFIED), so per-post FOM values are not available to us. That is a gap for
+  quality-aware masking.
+* Measured relative noise: ≲ 0.02 m (from the roughness distribution;
+  `terrain-analysis.md` §6).
+
+### 9.5 Other datasets considered
+
+| Dataset | Resolution | Use | Status |
+|---|---|---|---|
+| HiRISE RED orthoimages (`*_RED_C_01_ORTHO`, `*_RED_A_01_ORTHO`) | ~1 m / 0.25 m | context imagery; rock detection (CFA) at 0.25 m | DOC; A-products are 0.4–1 GB each; JP2 read by GDAL's JP2OpenJPEG driver (driver present, not exercised) |
+| MOLA MEGDR / MOLA–HRSC blended DEM | 463 m / 200 m | regional context, areoid | §1 |
+| CTX ASP DTMs (USGS, [docs](https://stac.astrogeology.usgs.gov/docs/data/mars/ctxdtms)) | ~20 m | alternative regional DTMs | DOC |
+| Perseverance traverse and localisation (PDS, MMGIS) | rover scale | validation of planned corridors | future (traversability.md §7) |
+| THEMIS thermal inertia | 100 m | proxy for loose material vs rock | future; would support terrain classes |
+
+---
+
+## 10. Rover traversability: what flight and mission teams do
+
+| Source | What it establishes | Used for |
+|---|---|---|
+| **Goldberg, Maimone & Matthies 2002**, GESTALT, IEEE Aerospace, doi:10.1109/AERO.2002.1035370 ([PDF](https://robotics.jpl.nasa.gov/media/documents/aero.pdf)), read in full | rover-sized patch plane fit from moment statistics; step (max elevation difference vs clearance), roughness (residual vs clearance fraction), pitch (plane slope vs max pitch) and border (unknown neighbour) hazards; obstacles grow by half the vehicle width; unknown cells get zero certainty | footprint tilt and roughness definitions, configuration-space evaluation, unknown handling |
+| **Ono et al. 2016**, Mars 2020 Traversability Tools, doi:10.1109/AERO.2016.7500597 ([PDF](https://www-robotics.jpl.nasa.gov/media/documents/Data-driven%20surface%20traversability%20analysis%20for%20Mars%202020%20landing%20site%20selection.pdf)), read in full | slope + CFA + terrain class + hazard → binary and speed models; cost = 1/speed; Dijkstra on an 8-connected grid; slope ~20° (cohesive) / ~10° (sand); 80 / 60 m/h by CFA band; 8-connected distance −5.4 % correction; +30 % for obstacle avoidance | model structure, published thresholds and speeds, metrication note |
+| JPL M2020 mobility page ([link](https://robotics.jpl.nasa.gov/what-we-do/flight-projects/mars-2020-rover/m2020mobility/)) | wheel speed 4.2 cm/s (~150 m/h); Perseverance autonomous rate ~110 m/h; GESTALT treats the rover as a disc; ENav is orientation-sensitive | disc footprint, speed range |
+| Otsu et al., ACE ([arXiv:1808.00031](https://arxiv.org/abs/1808.00031)) | conservative closed-form bounds on clearance, attitude and suspension angles; planned for Mars 2020 onboard planning | future body-clearance model (instead of generic curvature) |
+| Carsten et al. 2007, Global path planning on MER ([PDF](https://www-robotics.jpl.nasa.gov/media/documents/IEEEAC-Carsten-1125.pdf)) | Field D* (interpolated, any-angle) global planner combined with GESTALT arcs; uploaded to MER in 2006 | any-angle planning as the next planner step |
+| NASA/JPL PIA26073 (2023), [link](https://www.jpl.nasa.gov/images/pia26073-perseverance-autonav-avoids-a-boulder) | AutoNav routed around a 35 cm rock | order of magnitude for the step limit (**not** a published limit; a secondary-source "wheel drop 35 cm" claim was not confirmed) |
+| JPL Mars 2020 press kit ([quick facts](https://www.jpl.nasa.gov/news/press_kits/mars_2020/launch/quick_facts/)) | 3.0 × 2.7 × 2.2 m, ~1025 kg | footprint, mass |
+| Heverly et al. 2013 (JFR), Arvidson et al. (cited by Ono et al. [5], [6]) | MSL traverse performance, sand and ripple mobility | not read directly; cited through Ono et al. |
+| Golombek & Rapp 1997; Golombek et al. (cited by Ono et al. [7], [11], [14]) | rock size-frequency model, CFA | future CFA layer |
+
+Conclusion: traversability must be **vehicle-specific, footprint-scale and
+uncertainty-aware**, with unknown terrain excluded. Slope or TRI alone does not meet
+that bar. All three (vehicle-specific, footprint-scale, uncertainty-aware) are now
+implemented; CFA and terrain classes are the documented gaps.
+
+---
+
+## 11. Terrain-analysis libraries (VERIFIED on linux/arm64 in our image)
+
+| Library | Version | Licence | arm64 | Planetary compatibility | Verdict |
+|---|---|---|---|---|---|
+| **SciPy `ndimage`** | 1.18.1 | BSD-3 | wheel ✓ | body-agnostic array operators | **Selected** for windowed operators (exact correlations, min-filters) |
+| NumPy | 2.3.5 | BSD-3 | ✓ | agnostic | Selected |
+| xarray-spatial | 0.10.20 | MIT | wheel ✓ | `slope(method='planar')` is agnostic, but **`method='geodesic'` hard-codes WGS84** (`slope.py` imports `WGS84_A2, WGS84_B2`; `utils.py` uses 6378137) | Not selected: the Earth-geodesic path is a trap for Mars, it adds numba and dask, and the planar operators duplicate a few lines of NumPy |
+| WhiteboxTools (`whitebox` PyPI) | 2.3.6 / WBT 2.4.0 | MIT | runs ✓ | file-based CLI, agnostic | Not selected: the Python package **downloads the binary at runtime** (not reproducible inside our pinned image) and works through intermediate files. Good as an independent cross-check tool later. |
+| RichDEM | 0.3.4 | GPL-3 | **no arm64 wheel** (pip `--only-binary` fails) | agnostic | Rejected (build from source; GPL; low maintenance) |
+| GDAL `gdaldem` | 3.12 | MIT | CLI not in our wheel-based image (D7) | agnostic (planar; `-s` scale for geographic CRSs) | Not needed: its TRI/TPI/roughness were not selected (`terrain-analysis.md` §3) |
+| ISIS3 | – | public domain | osx-64 / amd64 only (§1) | native planetary | Not needed (map-projected input) |
+
+## 12. Planning libraries (VERIFIED where stated)
+
+| Library | Version | arm64 | Notes | Verdict |
+|---|---|---|---|---|
+| **SciPy `sparse.csgraph.dijkstra`** | 1.18.1 | ✓ | Dijkstra on CSR graphs, directed or undirected, predecessors; explicit graph lets us forbid corner cutting and later add directional costs | **Selected** (default engine) |
+| **scikit-image `graph.MCP_Geometric`** | 0.26.0 | ✓ | Cython Dijkstra on cost arrays; `(c_a + c_b)/2 · L` semantics; infinite costs impassable; no corner-cutting control | **Selected** as second engine and cross-check |
+| pyastar2d | 1.1.4 | wheel ✓ | C++ A* on numpy weights, 8-connected | Candidate if A* speed-up is needed; small project |
+| NetworkX | 3.7 | ✓ (pure Python) | too slow for 10⁶–10⁷ nodes | Rejected for grids |
+| scikit-fmm | 2025.6.23 | **no arm64 cp312 wheel** | fast marching, continuous geodesics | Rejected for now (§path-planning 1) |
+| OMPL (Python wheels) | 2.0.1 | wheel ✓, import ✓ | sampling-based planners, SE(2) spaces | Future: local kinematic refinement |
+| Nav2 Smac planner | ROS 2 | via ROS images | Hybrid A* / state lattice | Algorithmic reference; not a dependency |
+
+Measured on the real data: both engines return the identical optimum; dijkstra 2.8 s
+and 1.5 GB for a 4.7 M-cell window, mcp 2.5 s and 0.56 GB (`path-planning.md` §5).
+
+## 13. Data management for multi-resolution analysis
+
+| Option | Assessment | Decision |
+|---|---|---|
+| Nested grids in one region CRS (integer resolution ratios) | exact block alignment (20 m = 20×20 × 1 m), lossless stacking, exact block-mean comparisons (used for HiRISE vs CTX) | **Adopted** (D10) |
+| Resample HiRISE to 20 m | discards the information that matters for mobility | Rejected |
+| Resample HiRISE to 1.25 m (power-of-two zoom) | tiles bit-identical at z9, but drops below the native 1.0097 m posting | Rejected (1 m kept; tiles are resampled for display only) |
+| Mosaic CTX + HiRISE into one DTM | needs vertical co-registration first (−26 m offset) and a blending rule | Deferred; products stay separate |
+| Zarr / xarray datacube | right for many layers × time, and for ML patches | Still planned (D6); not needed by the 2-D pipeline |
+| STAC API (pgstac), PostGIS | no search or vector persistence need yet | Still deferred (D9) |
+
+Provenance carried per layer: source checksum and URL, recipe, grid, software versions,
+algorithm version, and for vehicle-specific layers the full vehicle parameter set and
+the uncertainty values used. Routes return the versions of every input layer.
+
+## 14. Compatibility matrix additions (2026-11-13)
+
+| Item | Evidence | Result |
+|---|---|---|
+| GDAL PDS driver (rasterio 1.5.2 wheel) reading a HiRISE PDS3 DTM | VERIFIED (remote `/vsicurl/` and local) | CRS, nodata, scale/offset correct |
+| PROJ local-radius Mars sphere → IAU 2015 sphere | VERIFIED | ballpark (identity on lat/lon), as intended |
+| GDAL drivers present: PDS, PDS4, ISIS3, VICAR, JP2OpenJPEG | VERIFIED (driver list) | available; only PDS exercised |
+| scipy 1.18.1 / scikit-image 0.26.0 arm64 wheels | VERIFIED (installed in image, tests pass) | OK |
+| xarray-spatial geodesic slope on Mars | VERIFIED by source reading | INCOMPATIBLE (WGS84 constants) |
+| WhiteboxTools 2.4.0 on arm64 | VERIFIED runs | runtime binary download |
+| RichDEM 0.3.4, scikit-fmm 2025.6.23 arm64 wheels | VERIFIED absent | source build required |
+| OMPL 2.0.1 Python wheel arm64 | VERIFIED import | OK (not used) |
+| TiTiler categorical `colormap` JSON on uint8 class COG | VERIFIED (UI) | OK; overviews use MODE |
+| Strip-wise derivation equals whole-array derivation | VERIFIED (test) | identical |
+
+## 15. ML: assessment
+
+No ML in this milestone, by design. Where ML adds concrete value later:
+1. **Terrain classification** (sand, ripples, bedrock) from HiRISE imagery. Ono et al.
+   2016 used a CNN (SPOC). Labels: AI4Mars (rover imagery, Swan et al. 2021) or manual
+   orbital labels. It would enable the 10° sand limit and the ripple rule.
+2. **Rock detection** for CFA: shadow segmentation is classical, and learned detectors
+   are optional.
+3. **Learned slip or speed models** trained on Perseverance drive logs (PDS), replacing
+   the assumed speed factors.
+
+Each output would be a versioned layer on the same grid, with the model version as its
+algorithm version, consumed by the existing traversability model.

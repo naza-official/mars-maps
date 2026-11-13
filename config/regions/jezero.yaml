@@ -16,9 +16,10 @@ crs:
 half_size_m: 81920
 base_resolution_m: 20.0
 tile_size: 256
-max_zoom: 8        # 2.5 m/px: overzoom beyond the 20 m data, for inspection convenience
+max_zoom: 10       # 0.625 m/px: shows the 1 m HiRISE layers at full detail
 
-# Layer recipes. `resolution_m` must be base_resolution_m / 2^k (nested, aligned grids).
+# Layer recipes. `resolution_m` must be base_resolution_m divided (or multiplied) by an
+# integer, so all grids are nested and aligned (powers of two also match tile zooms).
 # Resampling choices are explicit per layer: bilinear for continuous fields,
 # never nearest-on-downsample for elevation, never cubic for elevation (overshoot).
 layers:
@@ -64,3 +65,121 @@ layers:
     description: Visual-only hillshade (azimuth 315°, altitude 45°). Not for analysis.
     params: { azimuth_deg: 315, altitude_deg: 45 }
     render: { colormap: null, rescale: [1, 255] }
+
+  # ------------------------------------------------------------------ HiRISE (1 m)
+  # A local high-resolution product nested in the same grid family. 20 m / 20 = 1 m keeps
+  # the source's native 1.0097 m posting: an almost 1:1 resample, which is unavoidable
+  # because the projection changes. The regional CTX layers are untouched. Both
+  # resolutions coexist, and each analysis uses the product that fits its scale.
+  - id: hirise_elevation
+    title: Elevation (HiRISE DTM, 1 m)
+    op: warp
+    source: hirise_dtm_DTEEC_045994_1985_046060_1985_U01
+    resolution_m: 1.0
+    resampling: bilinear
+    dtype: float32
+    units: m
+    description: >-
+      Height above the MOLA areoid (Mars 2000 datum) from HiRISE DTM
+      DTEEC_045994_1985_046060_1985_U01 (original PDS3 product), bilinear onto the 1 m
+      regional grid. Effective horizontal resolution ~3-5 m (stereo matching); vertical
+      precision tens of cm.
+    render: { colormap: gist_earth, rescale: auto }
+  - id: hirise_hillshade
+    title: Hillshade (HiRISE, 1 m)
+    op: hillshade
+    input: hirise_elevation
+    dtype: uint8
+    units: "1"
+    description: Visual-only hillshade of the HiRISE DTM (azimuth 315°, altitude 45°).
+    params: { azimuth_deg: 315, altitude_deg: 45 }
+    render: { colormap: null, rescale: [1, 255] }
+  - id: hirise_slope
+    title: Slope (HiRISE, Horn 3x3 at 1 m)
+    op: slope
+    input: hirise_elevation
+    dtype: float32
+    units: deg
+    description: >-
+      Horn (1981) slope at the 1 m posting (3 m baseline). Sensitive to DTM noise and
+      sub-footprint relief, so it is shown for reference only. Traversability uses the
+      rover-footprint plane-fit tilt instead.
+    render: { colormap: rdylgn_r, rescale: [0, 30] }
+  - id: hirise_tilt_5m
+    title: Footprint tilt (5 m plane fit)
+    op: plane_tilt
+    input: hirise_elevation
+    dtype: float32
+    units: deg
+    params: { window_m: 5 }
+    description: >-
+      Inclination of the least-squares plane fitted to the 5 x 5 m patch centred on each
+      cell. This is a GESTALT-style rover-patch fit: 5 m is at least the 4.04 m disc that
+      circumscribes a 3.0 x 2.7 m rover. NaN if any elevation in the patch is missing.
+    render: { colormap: rdylgn_r, rescale: [0, 25] }
+  - id: hirise_roughness_5m
+    title: Footprint roughness (5 m plane residual)
+    op: plane_roughness
+    input: hirise_elevation
+    dtype: float32
+    units: m
+    params: { window_m: 5 }
+    description: >-
+      Largest absolute deviation of the 5 x 5 m patch elevations from their fitted plane,
+      i.e. the step or bump height relative to the chassis plane. Limited by the DTM's
+      effective resolution: rocks smaller than ~2-3 m are not resolved.
+    render: { colormap: magma, rescale: [0, 0.6] }
+  - id: trav_class_perseverance
+    title: Traversability class (Perseverance-like rover)
+    op: traversability_class
+    vehicle: perseverance
+    inputs: { tilt: hirise_tilt_5m, roughness: hirise_roughness_5m }
+    dtype: uint8
+    units: class
+    description: >-
+      Vehicle-specific classes from footprint tilt and roughness, with uncertainty bands
+      (docs/traversability.md). Unknown terrain is never treated as traversable.
+    categories:
+      - { value: 1, label: nominal, color: "#1a9850" }
+      - { value: 2, label: slow, color: "#fee08b" }
+      - { value: 3, label: marginal (uncertain), color: "#f46d43" }
+      - { value: 4, label: hazard (impassable), color: "#a50026" }
+      - { value: 5, label: unknown (no data), color: "#5e4fa2" }
+    render: { colormap: null, rescale: [1, 5] }
+  - id: time_perseverance
+    title: Traverse time (Perseverance-like rover)
+    op: traversal_time
+    vehicle: perseverance
+    inputs: { tilt: hirise_tilt_5m, roughness: hirise_roughness_5m }
+    dtype: float32
+    units: s/m
+    description: >-
+      Expected driving time per metre from the speed model (3600 / speed[m/h]). NaN where
+      impassable or unknown. Experimental parameters: config/vehicles/perseverance.yaml.
+    render: { colormap: viridis, rescale: [40, 120] }
+  - id: cost_perseverance
+    title: Planning cost (risk-weighted time)
+    op: traversal_cost
+    vehicle: perseverance
+    inputs: { tilt: hirise_tilt_5m, roughness: hirise_roughness_5m }
+    dtype: float32
+    units: s/m
+    description: >-
+      Route-planning objective per metre: traverse time, multiplied by the experimental
+      marginal_cost_multiplier on cells whose classification is uncertain. NaN cells are
+      never entered by the planner.
+    render: { colormap: viridis, rescale: [40, 200] }
+
+# Route planning: the numerical layers the planner consumes, per vehicle.
+planning:
+  perseverance:
+    cost: cost_perseverance
+    time: time_perseverance
+    classes: trav_class_perseverance
+    samples:
+      elevation: hirise_elevation
+      tilt: hirise_tilt_5m
+      roughness: hirise_roughness_5m
+      slope_1m: hirise_slope
+    max_cells: 8000000      # dijkstra engine peaks at ~2.4 GB for 7.7 M cells (measured)
+    default_margin_m: 300

@@ -10,22 +10,26 @@ Tile serving reuses TiTiler (titiler.core factories) with two Mars-specific chan
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from titiler.core.errors import DEFAULT_STATUS_CODES, add_exception_handlers
 from titiler.core.factory import ColorMapFactory, TilerFactory, TMSFactory
 
 import marsgis
-from marsgis.catalog import load_items
-from marsgis.config import get_settings, list_regions, load_region
+from marsgis.catalog import item_asset_path, load_items
+from marsgis.config import get_settings, list_regions, list_vehicles, load_region, load_vehicle
 from marsgis.crs import crs_to_proj4, lonlat_to_xy, mars_sphere
 from marsgis.grid import region_grid
 from marsgis.inspect import coordinate_report, sample_layer
 from marsgis.logs import configure_logging
+from marsgis.planning import PlanningError
+from marsgis.routing import plan_for_region
 from marsgis.tms import base_zoom, build_registry, region_tms_id
 
 settings = get_settings()
@@ -39,7 +43,8 @@ app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
 )
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["GET"],
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
+                   allow_methods=["GET", "POST"],
                    allow_headers=["*"])
 add_exception_handlers(app, DEFAULT_STATUS_CODES)
 
@@ -64,13 +69,10 @@ def _items(region_id: str) -> dict[str, dict[str, Any]]:
 
 
 def _asset_path(item: dict[str, Any]) -> Path:
-    href = item["assets"]["data"]["href"]
-    if not href.startswith("/data/"):
-        raise HTTPException(500, "unexpected asset href")
-    path = (settings.data_dir / href.removeprefix("/data/")).resolve()
-    if settings.data_dir.resolve() not in path.parents:
-        raise HTTPException(500, "asset outside data dir")
-    return path
+    try:
+        return item_asset_path(item, settings.data_dir)
+    except ValueError as e:
+        raise HTTPException(500, str(e)) from e
 
 
 def LayerPathParams(
@@ -142,6 +144,7 @@ def region_detail(region_id: str) -> dict[str, Any]:
             "nodata": band["nodata"],
             "statistics": band["statistics"],
             "render": layer_cfg.render.model_dump(),
+            "categories": [c.model_dump() for c in layer_cfg.categories],
             "footprint_lonlat": item["geometry"],
         })
     return {
@@ -162,6 +165,7 @@ def region_detail(region_id: str) -> dict[str, Any]:
         "tms": {"id": region_tms_id(region), "base_zoom": base_zoom(region),
                 "max_zoom": region.max_zoom, "tile_size": region.tile_size},
         "layers": layers,
+        "planning": {vid: cfg.model_dump() for vid, cfg in region.planning.items()},
     }
 
 
@@ -207,3 +211,66 @@ def inspect(
                 **sample_layer(_asset_path(items[layer_cfg.id]), x, y),
             }
     return {"region": region_id, "location": coordinate_report(grid, x, y), "layers": values}
+
+
+# ----------------------------------------------------------------------- vehicles / routes
+
+
+@app.get("/api/vehicles", tags=["routes"])
+def vehicles() -> list[dict[str, Any]]:
+    return [{"id": v.id, "name": v.name, "status": v.status}
+            for v in (load_vehicle(vid) for vid in list_vehicles())]
+
+
+@app.get("/api/vehicles/{vehicle_id}", tags=["routes"])
+def vehicle_detail(vehicle_id: str) -> dict[str, Any]:
+    """All mobility parameters with value, unit, basis (published/derived/assumption), source."""
+    if vehicle_id not in list_vehicles():
+        raise HTTPException(404, f"unknown vehicle {vehicle_id!r}")
+    return load_vehicle(vehicle_id).model_dump()
+
+
+#: Route planning is CPU- and memory-heavy (dijkstra: ~320 B/cell, up to ~2.5 GB per
+#: request at the 8 M-cell cap). Bound concurrent plans so parallel requests cannot
+#: exhaust the container's memory; excess requests get 503 instead of queueing forever.
+_PLANNING_SLOTS = threading.BoundedSemaphore(2)
+
+
+class Waypoint(BaseModel):
+    lon: float | None = Field(None, description="deg east, planetocentric")
+    lat: float | None = Field(None, description="deg, planetocentric")
+    x: float | None = Field(None, description="region CRS easting (m)")
+    y: float | None = Field(None, description="region CRS northing (m)")
+
+
+class RouteRequest(BaseModel):
+    waypoints: list[Waypoint] = Field(min_length=2, max_length=20,
+                                      description="start, optional via points, destination")
+    vehicle: str = "perseverance"
+    engine: Literal["dijkstra", "mcp"] = "dijkstra"
+    margin_m: float | None = Field(None, ge=0, le=5000,
+                                   description="planning window margin around the waypoints")
+
+
+@app.post("/api/regions/{region_id}/routes", tags=["routes"])
+def plan(region_id: str, req: RouteRequest) -> dict[str, Any]:
+    """Minimum-cost route on the vehicle's numerical cost raster (never on rendered tiles).
+
+    Returns geometry (region CRS and lon/lat), totals (distance, risk-weighted objective,
+    estimated drive time, elevation gain/loss, max tilt/roughness), per-leg results,
+    per-vertex profiles, class runs, warnings and the versions of every input layer.
+    """
+    if region_id not in list_regions():
+        raise HTTPException(404, f"unknown region {region_id!r}")
+    wps = [{k: v for k, v in w.model_dump().items() if v is not None} for w in req.waypoints]
+    if not _PLANNING_SLOTS.acquire(timeout=30):
+        raise HTTPException(503, "route planner busy; retry shortly")
+    try:
+        return plan_for_region(region_id, req.vehicle, wps, engine=req.engine,
+                               margin_m=req.margin_m)
+    except PlanningError as e:
+        status = 404 if e.code in {"unknown_vehicle", "layers_missing"} else 422
+        raise HTTPException(status, {"code": e.code, "message": str(e),
+                                     **{k: v for k, v in e.details.items()}}) from e
+    finally:
+        _PLANNING_SLOTS.release()

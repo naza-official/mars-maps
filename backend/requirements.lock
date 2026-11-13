@@ -67,10 +67,14 @@ idna==3.20
     #   anyio
     #   httpx
     #   httpx2
+imageio==2.38.1
+    # via scikit-image
 iniconfig==2.3.1
     # via pytest
 jinja2==3.1.6
     # via titiler-core
+lazy-loader==0.6
+    # via scikit-image
 markupsafe==3.0.4
     # via jinja2
 morecantile==7.1.0
@@ -79,23 +83,35 @@ morecantile==7.1.0
     #   planetcantile
     #   rio-tiler
     #   titiler-core
+networkx==3.7
+    # via scikit-image
 numexpr==2.14.2
     # via rio-tiler
 numpy==2.3.5
     # via
     #   marsgis (pyproject.toml)
     #   color-operations
+    #   imageio
     #   numexpr
     #   planetcantile
     #   rasterio
     #   rio-tiler
+    #   scikit-image
+    #   scipy
+    #   tifffile
     #   titiler-core
 opentelemetry-api==1.45.2
     # via fastapi
 packaging==26.3
-    # via pytest
+    # via
+    #   lazy-loader
+    #   pytest
+    #   scikit-image
 pillow==13.0.0
-    # via planetcantile
+    # via
+    #   imageio
+    #   planetcantile
+    #   scikit-image
 planetcantile==0.6.0
     # via marsgis (pyproject.toml)
 pluggy==1.7.0
@@ -226,12 +242,20 @@ rio-tiler==9.4.13
     #   titiler-core
 ruff==0.14.5
     # via marsgis (pyproject.toml)
+scikit-image==0.26.0
+    # via marsgis (pyproject.toml)
+scipy==1.18.1
+    # via
+    #   marsgis (pyproject.toml)
+    #   scikit-image
 simplejson==4.3.0
     # via titiler-core
 starlette==1.10.0
     # via
     #   fastapi
     #   titiler-core
+tifffile==2026.11.12
+    # via scikit-image
 titiler-core==2.4.0
     # via marsgis (pyproject.toml)
 truststore==0.10.5 ; sys_platform != 'emscripten'

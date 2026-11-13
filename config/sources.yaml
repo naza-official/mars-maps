@@ -38,3 +38,58 @@ sources:
     # Observed: float32, values ~0-0.95, same 20.16 m grid as the DTM, no unit tag.
     # Possibly I/F, unverified -> treated as dimensionless relative brightness.
     units: "1"
+
+  # --- HiRISE stereo DTM (1 m posting): crater floor and delta front around the
+  # Perseverance landing site. We ingest the ORIGINAL PDS3 product from the HiRISE team
+  # archive, not the USGS ARD COG of the same DTM. The ARD copy was re-projected to
+  # clon=0 with *cubic* resampling (its provenance.txt: `gdalwarp -r cubic -t_srs
+  # IAU_2015:49910`), so using it would mean resampling twice and inheriting cubic
+  # overshoot. GDAL's PDS driver reads the IMG directly (verified: CRS, MISSING_CONSTANT,
+  # scaling). See docs/research.md section 9.
+  - id: hirise_dtm_DTEEC_045994_1985_046060_1985_U01
+    title: HiRISE DTM DTEEC_045994_1985_046060_1985_U01 (Jezero crater floor and delta front)
+    kind: elevation
+    format: PDS3 IMG (attached label)
+    url: https://hirise-pds.lpl.arizona.edu/PDS/DTM/ESP/ORB_045900_045999/ESP_045994_1985_ESP_046060_1985/DTEEC_045994_1985_046060_1985_U01.IMG
+    stac_item: https://stac.astrogeology.usgs.gov/api/collections/mro_hirise_socet_dtms/items/DTEEC_045994_1985_046060_1985_U01
+    sidecars:
+      ard_provenance: https://astrogeo-ard.s3-us-west-2.amazonaws.com/mars/mro/hirise/controlled/dtm/ESP_045994_1985_ESP_046060_1985/provenance.txt
+    license: NASA PDS archive data (public, no use restrictions); the USGS ARD copy is CC0-1.0
+    citation: >-
+      HiRISE team (University of Arizona) and USGS Astrogeology, MRO HiRISE DTM
+      DTEEC_045994_1985_046060_1985_U01 (PDS data set MRO-M-HIRISE-5-DTM-V1.0),
+      produced with ISIS and SOCET Set as described in Kirk et al. (2008),
+      doi:10.1029/2007JE003000.
+    expected:
+      # GDAL PDS driver: equirectangular, clon 77.44 E, lat_ts 15 N, on a sphere with the
+      # *local* radius 3 394 839.8 m (label note). Latitudes are planetocentric.
+      crs_name_contains: "EQUIRECTANGULAR MARS"
+      dtype: float32
+      nodata: -3.4028226550889045e+38  # MISSING_CONSTANT 16#FF7FFFFB#
+    units: m  # label: "elevations in meters above ... Mars 2000 Datum"; SCALING_FACTOR 1, OFFSET 0
+    vertical_datum: Mars 2000 datum = MOLA areoid (Smith et al. 2001), same as the CTX DTM
+    native_resolution_m: 1.0096633268711  # label MAP_SCALE
+    vertical_precision:
+      value: 0.25
+      unit: m
+      basis: assumption
+      source: >-
+        HiRISE team: 1 m DTMs have "vertical precision in the tens of centimeters"
+        (uahirise.org/dtm/about.php). This product's label gives no expected precision, so
+        0.25 m is chosen within the published range. Replace it with the product's EP
+        (Kirk et al. 2008: EP = rho * GSD / (p/h)) when that is available.
+    # Patch-scale (5 m) features depend on *relative* height errors between nearby posts,
+    # not on the absolute precision above. Measured on this product (docs/terrain-analysis.md
+    # section 6): the median 5 m plane-fit max residual over the whole DTM is 0.037 m and the
+    # 1st percentile is 0.0085 m. Independent noise of sigma would give a residual of about
+    # 2 sigma, so the uncorrelated relative error must be <= ~0.02 m. We use 0.05 m (2.5x
+    # that upper bound). This band does NOT cover SOCET "box" artefacts of 0.5-1 m, a
+    # known HiRISE DTM failure mode (uahirise.org/dtm/about.php); see the limitations.
+    relative_precision:
+      value: 0.05
+      unit: m
+      basis: derived
+      source: >-
+        Conservative upper bound derived from this product's measured 5 m plane-fit residual
+        distribution (median 0.037 m, p01 0.0085 m); reproduce with
+        `marsgis feature-stats --region jezero --layer hirise_roughness_5m`.

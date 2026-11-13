@@ -8,15 +8,19 @@ plus a static web client. Everything runs in Docker Compose.
 ```mermaid
 flowchart LR
   subgraph External
-    USGS[(USGS Astrogeology<br/>STAC + S3 COGs)]
+    USGS[(USGS Astrogeology<br/>STAC + S3 COGs: CTX)]
+    PDS[(HiRISE PDS archive<br/>PDS3 IMG DTM)]
     NASA[(NASA challenge data<br/>format TBD)]
   end
 
   subgraph Pipeline["init-data / marsgis CLI (batch)"]
     ING[ingest<br/>fetch + checksum + validate]
-    PROC[processing<br/>warp to grid, derive terrain]
+    PROC[processing<br/>warp to nested grids,<br/>strip-wise derivation]
+    TER[terrain<br/>slope, footprint tilt/roughness]
+    TRV[traversability<br/>vehicle model: class, time, cost]
     CAT[catalog<br/>STAC items + provenance]
   end
+  VEH[(config/vehicles<br/>parameters + basis)]
 
   subgraph Store["./data (bind mount)"]
     RAW[(raw/<br/>immutable)]
@@ -26,16 +30,24 @@ flowchart LR
 
   subgraph API["api (FastAPI + titiler.core)"]
     REG[/regions, inspect/]
+    RTE[/routes, vehicles/]
     TIL[/cog tiles, point, info<br/>Mars TMS only/]
     TMS[/tileMatrixSets, colorMaps/]
   end
 
-  WEB[web: OpenLayers + proj4js<br/>region CRS]
+  PLAN[planning<br/>SciPy csgraph / skimage MCP<br/>framework-independent]
+  WEB[web: OpenLayers + proj4js<br/>region CRS, route panel]
 
   USGS --> ING
+  PDS --> ING
   NASA -.future adapters.-> ING
   ING --> RAW --> PROC --> PRO
+  PROC --- TER
+  PROC --- TRV
+  VEH --> TRV
   PROC --> CAT --> STAC
+  STAC --> RTE
+  PRO --> PLAN --> RTE --> WEB
   STAC --> REG
   STAC --> TIL
   PRO --> TIL
@@ -52,12 +64,15 @@ flowchart LR
 | 1 | Data ingestion | `ingest.py`, `config/sources.yaml` | HTTP fetch, SHA-256, provenance, metadata validation against declared expectations |
 | 2 | Scientific preprocessing | `processing.py` | Block-wise warp (WarpedVRT), COG writing, statistics |
 | 3 | CRS & spatial alignment | `crs.py`, `grid.py`, `config/regions/*.yaml` | Mars-only CRS guard, regional TM, nested aligned grids |
-| 4 | Derived layers | `processing.py` (`slope`, `hillshade`) | Horn gradients, NaN propagation; future: roughness, traversability |
+| 4 | Derived layers | `processing.py` (strip/halo driver), `terrain.py` | Horn slope/hillshade; rover-footprint plane-fit tilt and roughness (`terrain-analysis.md`) |
+| 4a | Traversability | `traversability.py`, `config/vehicles/*.yaml` | Vehicle-specific classes, traverse time, planning cost, with uncertainty bands (`traversability.md`) |
+| 4b | Data quality | `quality.py` | Feature quantiles, cross-product DTM comparison on nested grids |
 | 5 | Raster/vector storage | filesystem `data/` (COG); vectors future | S3/MinIO-ready via GDAL VSI |
 | 6 | Metadata & discovery | `catalog.py` | Static STAC per region |
 | 7 | Geospatial API & tiles | `api/app.py`, `tms.py`, `inspect.py` | Region detail, multi-layer inspection, TiTiler tiles in Mars TMSs |
-| 8 | Route planning & ML | — (planned, §7) | Consumes aligned layer stack |
-| 9 | Frontend | `frontend/src` | OpenLayers in region CRS, per-layer styling, legends, inspection |
+| 8 | Route planning | `planning.py` (engine), `routing.py` (region service), `sensitivity.py` | Dijkstra (SciPy csgraph, no corner cutting) and MCP_Geometric on numerical cost rasters; diagnostics; sensitivity (`path-planning.md`) |
+| 8a | ML | — | Deliberately not yet (`research.md` §15) |
+| 9 | Frontend | `frontend/src` (`main.ts`, `route.ts`) | OpenLayers in region CRS, per-layer styling, categorical legends, inspection, route panel with profile |
 
 Orchestration is `pipeline.py`: topological order of layer recipes, content-addressed
 versions, idempotent builds, alignment check before publishing.
@@ -68,16 +83,29 @@ versions, idempotent builds, alignment check before publishing.
    name/dtype/nodata**, declared units and vertical datum (facts the file may not carry).
 2. `ingest.fetch_source` downloads verbatim to `data/raw/<id>/` with `provenance.json`;
    `validate_source` fails on missing/non-Mars CRS or any mismatch with expectations.
-3. `pipeline.build_region` processes layer recipes from `config/regions/<id>.yaml`:
-   * `op: warp` — source → region grid (declared resampling), source nodata → NaN;
-   * `op: slope | hillshade` — derived from another layer on the same grid.
+3. `pipeline.build_region` processes layer recipes from `config/regions/<id>.yaml` in
+   dependency order:
+   * `op: warp`: source → a member of the region grid family (20 m CTX, 1 m HiRISE;
+     declared resampling), source nodata → NaN;
+   * `op: slope | hillshade | plane_tilt | plane_roughness`: terrain features from an
+     elevation layer on the same grid, computed in 512-row strips with an operator-radius
+     halo (bounded memory, identical to whole-array results);
+   * `op: traversability_class | traversal_time | traversal_cost`: a vehicle model
+     (`config/vehicles/<id>.yaml`) applied to named feature inputs. The uncertainty is
+     propagated from the root source's declared precision, and the vehicle parameters
+     and uncertainty values become part of the version hash and provenance.
 4. Each output is verified to be grid-aligned, then described by a STAC Item (statistics,
    projection, provenance) in `data/catalog/<region>/`.
 5. The API reads only the catalog and COGs (read-only mount). Tiles are rendered on demand
    by rio-tiler from COG overviews/blocks; `/inspect` reads single full-resolution cells.
 6. The browser fetches `/api/regions/<id>` (CRS as PROJ string + WKT2, frame, TMS,
-   layers, statistics, render defaults), builds its projection and tile grid from it —
-   there is no CRS hard-coded in the frontend.
+   layers, statistics, render defaults, categories, planning configuration) and builds
+   its projection and tile grid from it. No CRS is hard-coded in the frontend.
+7. Route requests (`POST /api/regions/<id>/routes`) go through `routing.py`, which maps
+   the vehicle to its planning layers (region `planning:` config) via the catalog. They
+   then go to `planning.plan_route`, which reads the **numerical** cost, time and class
+   COGs for a bounded window, runs Dijkstra, and samples feature layers along the path.
+   The result includes the content-addressed versions of every input.
 
 ## 4. Storage architecture
 
@@ -122,9 +150,11 @@ Details: `docs/data-model.md`.
 | `GET /api/tileMatrixSets[/{id}]` | OGC TMS documents (Mars only) |
 | `GET /api/colorMaps/{name}` | Colormap for legends |
 
-OpenAPI: `http://localhost:8000/api/docs`. Future: `POST /api/regions/{id}/routes`
-(route request → GeoJSON LineString + per-segment costs), `GET .../cost-surfaces/...`
-(served as ordinary layers).
+| `GET /api/vehicles[/{id}]` | Vehicle list; all mobility parameters with value, unit, basis and source |
+| `POST /api/regions/{id}/routes` | Body `{waypoints:[{lon,lat}\|{x,y}…], vehicle, engine: dijkstra\|mcp, margin_m}` → geometry (region CRS + lon/lat), summary, legs, per-vertex profile, class runs, warnings, input versions. Structured 4xx errors with `code`. At most 2 concurrent plans (503 otherwise). |
+
+Cost, time and class surfaces are ordinary layers, so they are served as tiles and are
+inspectable like any other layer. OpenAPI: `http://localhost:8000/api/docs`.
 
 ## 7. Frontend rendering architecture
 
@@ -141,25 +171,28 @@ OpenAPI: `http://localhost:8000/api/docs`. Future: `POST /api/regions/{id}/route
 * 3-D (future): CesiumJS with `Ellipsoid.MARS` for context views; the 2-D analysis map
   stays in OpenLayers.
 
-## 8. Path to route planning and ML
+## 8. Terrain → traversability → route (implemented 2026-11-13)
 
-1. **Cost surface as a layer.** A new recipe op (e.g. `op: cost`) combines aligned inputs
-   (slope, roughness, hazard masks, later radiation/temperature exposure) into a cost per
-   cell, with explicit units (e.g. seconds or energy per metre) and NaN = impassable.
-   Served and inspected like any other layer.
-2. **Pathfinding.** 8-connected grid graph on the region lattice; costs scaled by step
-   length (20 m or 20√2 m — valid because the CRS is metric, D2). Start with
-   `skimage.graph.MCP_Geometric` (Dijkstra on rasters) or A* with a Euclidean heuristic;
-   multi-objective via weighted sums first, then Pareto sets (e.g. label-setting) for
-   distance vs exposure trade-offs. Route endpoint returns cells → x/y → lon/lat.
-3. **Exposure accumulation.** Integrate per-cell exposure rates along the path
-   (rate × traversal time), keeping units explicit.
-4. **ML.** Training samples are windows of the aligned stack (xarray/Zarr), labels on the
-   same lattice (e.g. traversability classes from rover drive data at Jezero). Models
-   produce new layers (with model version as algorithm version in provenance) — so ML
-   outputs are versioned, inspectable and usable as pathfinding costs.
-5. **Uncertainty.** Carry per-layer uncertainty layers (e.g. DTM QA, HiRISE FOM) and
-   evaluate route robustness by sampling.
+```
+raw HiRISE PDS3 IMG ──warp (bilinear, 1 m)──▶ hirise_elevation
+   ├─ slope (Horn 3×3) ─────────────────────▶ hirise_slope          (reference)
+   ├─ plane fit 5 m ────────────────────────▶ hirise_tilt_5m        ┐ vehicle-independent
+   └─ plane residual 5 m ───────────────────▶ hirise_roughness_5m   ┘ features
+                                 vehicle YAML + σ from source precision
+   tilt, roughness ──▶ traversability model ─▶ trav_class_<v>, time_<v>, cost_<v>
+   cost/time/class (+ samples) ──▶ planning.plan_route (SciPy / scikit-image Dijkstra)
+                                 ──▶ route JSON (geometry, totals, profile, provenance)
+```
 
-Heavy jobs (pathfinding over large regions, ML inference) should move to a worker
-process consuming the same package when they exceed request timescales.
+Separation of concerns: `terrain.py` has no vehicle knowledge; `traversability.py`
+has no I/O; `planning.py` reads rasters and coordinates but imports no API code;
+`routing.py` is the only place that knows about the catalog and region config;
+`api/app.py` validates requests and maps errors to HTTP codes. The frontend only
+visualises the structured results.
+
+Remaining extensions (documented in the respective docs): rock abundance and terrain
+classes as further feature inputs; probabilistic hazards; directional and heading-aware
+planning on a directed graph or state lattice; hierarchical CTX→HiRISE planning after
+vertical co-registration; ML layers (classes, slip) written back as versioned layers.
+If planning jobs outgrow request time, a worker process consuming the same package is
+the next architectural step. No queue or broker is needed before then.
