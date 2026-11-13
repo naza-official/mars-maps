@@ -1,0 +1,105 @@
+# Mobility parameters for a Perseverance-like (MSL-heritage, rocker-bogie) rover.
+#
+# STATUS: EXPERIMENTAL. These are *planning-analysis* parameters assembled from public
+# sources, not the flight team's onboard limits. Every value states its basis:
+#   published  - stated in a cited primary/official source
+#   derived    - computed from published values (derivation given)
+#   assumption - engineering assumption of this project; subject to the sensitivity
+#                analysis in docs/traversability.md and to replacement by mission data
+#
+# Model structure: Ono et al. 2016, "Data-driven surface traversability analysis for
+# Mars 2020 landing site selection", IEEE Aerospace Conf., doi:10.1109/AERO.2016.7500597
+# (hazard thresholds + speed model + time-optimal Dijkstra).
+id: perseverance
+name: Perseverance-like rover (public parameters, experimental)
+status: experimental
+description: >-
+  Rocker-bogie rover of about 1 t with a 3.0 x 2.7 m footprint. Hazard thresholds apply to
+  rover-footprint terrain features derived from orbital DTMs, so they describe metre-scale
+  terrain only. Rocks below the DTM's effective resolution are not represented; Ono et al.
+  2016 handle them with a separate rock-abundance (CFA) map, which this project does not
+  yet have.
+
+footprint_diameter:
+  value: 4.04
+  unit: m
+  basis: derived
+  source: >-
+    Diameter of the disc that circumscribes the 3.0 m x 2.7 m footprint (JPL Mars 2020
+    launch press kit, quick facts): sqrt(3.0^2 + 2.7^2). A disc makes the hazard check
+    independent of heading, as GESTALT does on Curiosity (robotics.jpl.nasa.gov, M2020
+    mobility).
+mass:
+  value: 1025
+  unit: kg
+  basis: published
+  source: JPL Mars 2020 launch press kit, quick facts (about 1,025 kg).
+max_tilt:
+  value: 20
+  unit: deg
+  basis: published
+  source: >-
+    Ono et al. 2016, section 2: in bedrock or cohesive regolith the vehicle "is able to
+    climb slopes up to approximately 20 degrees" (MSL heritage, Heverly et al. 2013).
+    Sand: about 10 degrees, which is not modelled because no terrain-class map exists yet.
+nominal_tilt:
+  value: 10
+  unit: deg
+  basis: assumption
+  source: >-
+    Tilt where speed reduction starts. Chosen as half of max_tilt and equal to the sand
+    climbing limit in Ono et al. 2016. Not a published limit.
+speed_factor_at_max_tilt:
+  value: 0.5
+  unit: "1"
+  basis: assumption
+  source: >-
+    Speed multiplier at max_tilt (linear from 1 at nominal_tilt), standing in for slip and
+    more cautious driving on slopes. Not a published value.
+max_step:
+  value: 0.35
+  unit: m
+  basis: assumption
+  source: >-
+    Not a published limit. Order of magnitude anchored on NASA/JPL PIA26073 ("Perseverance
+    AutoNav avoids a boulder", 2023), where AutoNav routed around a 14 in (35 cm) rock, and
+    on the 52.5 cm wheel diameter (NASA Mars 2020 rover tech specs). A secondary source
+    calls 35 cm a "wheel drop" threshold, but no NASA document confirms that. The value is
+    applied to the DTM plane-fit residual, a coarse proxy for step height.
+slow_step:
+  value: 0.20
+  unit: m
+  basis: assumption
+  source: >-
+    Residual above which the speed drops to speed_slow, analogous to the CFA 7-15 % band
+    in Ono et al. 2016 where more hazard processing is needed. Not a published value.
+speed_nominal:
+  value: 80
+  unit: m/h
+  basis: published
+  source: >-
+    Ono et al. 2016, section 2: "high speed AutoNav rate of approximately 80 m/hr" for
+    benign terrain (CFA < 7 %). JPL reports about 110 m/h achieved by Perseverance's ENav
+    (robotics.jpl.nasa.gov, M2020 mobility); 80 m/h is the more conservative planning
+    value.
+speed_slow:
+  value: 60
+  unit: m/h
+  basis: published
+  source: Ono et al. 2016, section 2, about 60 m/hr in moderately hazardous terrain (CFA 7-15 %).
+uncertainty_k:
+  value: 1.0
+  unit: "1"
+  basis: assumption
+  source: >-
+    Width of the 'marginal' band below each hard limit, in feature standard deviations.
+    k = 1 flags cells whose feature is within one sigma of a limit.
+marginal_cost_multiplier:
+  value: 2.0
+  unit: "1"
+  basis: assumption
+  source: >-
+    Risk aversion. The objective counts a metre on a marginal cell as this many metres of
+    time. It is dimensionless and has no physical calibration; see the sensitivity
+    analysis.
+unknown_policy: forbid
